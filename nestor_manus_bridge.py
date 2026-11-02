@@ -180,8 +180,8 @@ def find_seal_line(content):
 def body_sans_sceau(content):
     """Corps du message = tout sauf la PREMIERE ligne de sceau reconnue.
 
-    Reconstruction octet pour octet (split/join sur \n) : l'empreinte
-    sha16 est donc calculable des deux cotes sans ambiguite.
+    Reconstruction octet pour octet (split/join sur la nouvelle ligne) :
+    l'empreinte sha16 est calculable des deux cotes sans ambiguite.
     """
     sortie, retire = [], False
     for raw in content.split("\n"):
