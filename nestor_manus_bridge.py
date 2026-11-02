@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # nestor_manus_bridge.py -- liaison directe Nestor (VPS / OpenClaw) <-> Manus API v2
-# v1.4 -- 2026-11-03 -- stdlib only, python3.8+
+# v1.4.1 -- 2026-11-03 -- stdlib only, python3.8+
 #
+# v1.4.1 : compteur seq protege. L'etat est desormais sauvegarde AVANT l'appel
+#        best-effort `baseline` ; un echec reseau de celui-ci ne provoque plus
+#        la re-emission du meme seq au tour suivant (bug constate : seq=3
+#        emis 2 fois — le message partait, mais le seq n'etait pas persiste).
 # v1.4 : sceau v2 LIANT LE CORPS du message : la ligne #NESTOR/v2 embarque
 #        sha16 = sha256(corps sans la ligne de sceau)[:16], et le HMAC porte
 #        sur "NESTOR/v2|turn=...|verdict=...|sha16:...". Un corps substitue
@@ -333,8 +337,12 @@ def cmd_selftest(a):
 
 
 def newest_assistant_id(task_id, key):
-    r = api("GET", "/v2/task.listMessages",
-            params={"task_id": task_id, "order": "desc", "limit": 20}, key=key)
+    """Best-effort : jamais fatal pour l'appelant (l'etat est deja sauve)."""
+    try:
+        r = api("GET", "/v2/task.listMessages",
+                params={"task_id": task_id, "order": "desc", "limit": 20}, key=key)
+    except SystemExit:
+        return None
     for m in r.get("messages", []):
         if m.get("type") == "assistant_message":
             return m.get("id")
@@ -384,8 +392,11 @@ def cmd_send(a):
     st["task_id"] = task_id
     st["seq"] = seq
     st["last_sent_at"] = meta["ts"]
-    st["baseline"] = newest_assistant_id(task_id, key)
-    save_state(st)
+    save_state(st)  # d'abord l'etat critique ; jamais bloque par le best-effort
+    baseline = newest_assistant_id(task_id, key)
+    if baseline:
+        st["baseline"] = baseline
+        save_state(st)
     print("OK seq=%s task_id=%s url=%s" % (seq, task_id, resp.get("task_url", "")))
     return 0
 
