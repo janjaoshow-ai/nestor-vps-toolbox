@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 # nestor_manus_bridge.py -- liaison directe Nestor (VPS / OpenClaw) <-> Manus API v2
-# v1.3 -- 2026-11-03 -- stdlib only, python3.8+
+# v1.4 -- 2026-11-03 -- stdlib only, python3.8+
 #
+# v1.4 : sceau v2 LIANT LE CORPS du message : la ligne #NESTOR/v2 embarque
+#        sha16 = sha256(corps sans la ligne de sceau)[:16], et le HMAC porte
+#        sur "NESTOR/v2|turn=...|verdict=...|sha16:...". Un corps substitue
+#        (brouillon vs message reel, meme tour/verdict) ne verifie plus.
+#        Compatibilite v1 preservee (les lignes v1 restent acceptees).
+#        inseal etendu : [--body fichier | --sha16 empreinte] -> mode v2.
 # v1.3 : commande `inseal` -- Nestor verifie lui-meme le sceau entrant de Manus
 #        (recalcul HMAC) pour publier une ligne seal_check=ok fondee, exigee
 #        par la discipline boite (protocole Echange M>N).
@@ -24,7 +30,8 @@
 #        --task-ref T12 --self-score 7 [--new] [--project-id ID] [--dry-run]
 #   ./nestor_manus_bridge.py poll --timeout 2700 [--rescan]
 #   ./nestor_manus_bridge.py verify --line 'NESTOR1|seq=124|...'
-#   ./nestor_manus_bridge.py inseal --turn 000002 --verdict 8 --sig <16 hex>
+#   ./nestor_manus_bridge.py inseal --turn 000002 --verdict 8 --sig <16 hex> \
+#        [--body /chemin/corps.md | --sha16 <16 hex>]   (mode v2)
 #   ./nestor_manus_bridge.py credits
 #   ./nestor_manus_bridge.py state
 #
@@ -54,6 +61,9 @@ PROFILES = ["standard", "lite"]
 
 SEAL_RE = re.compile(
     r"^#NESTOR/v1\|turn=(\d{6})\|verdict=([0-9]{1,2}|na)\|seal=([0-9a-f]{16})$"
+)
+SEAL_RE_V2 = re.compile(
+    r"^#NESTOR/v2\|turn=(\d{6})\|verdict=([0-9]{1,2}|na)\|sha16=([0-9a-f]{16})\|seal=([0-9a-f]{16})$"
 )
 
 
@@ -129,6 +139,15 @@ def make_seal(secret, turn, verdict):
                     hashlib.sha256).hexdigest()[:16]
 
 
+def hash16(data_bytes):
+    return hashlib.sha256(data_bytes).hexdigest()[:16]
+
+
+def make_seal_v2(secret, turn, verdict, empreinte):
+    material = "NESTOR/v2|turn=%s|verdict=%s|sha16:%s" % (turn, verdict, empreinte)
+    return hmac.new(secret.encode(), material.encode(), hashlib.sha256).hexdigest()[:16]
+
+
 def check_seal(secret, line):
     """Verifie une ligne de sceau deja isolee. -> (ok, turn, verdict, raison)."""
     m = SEAL_RE.match(line.strip())
@@ -150,24 +169,50 @@ def strip_markup(raw):
 
 
 def find_seal_line(content):
-    """Cherche la ligne de sceau dans tout le message (premier match)."""
+    """Cherche la ligne de sceau (v1 ou v2) dans tout le message (premier match)."""
     for raw in content.split("\n"):
         cand = strip_markup(raw)
-        if cand and SEAL_RE.match(cand):
+        if cand and (SEAL_RE_V2.match(cand) or SEAL_RE.match(cand)):
             return cand
     return None
+
+
+def body_sans_sceau(content):
+    """Corps du message = tout sauf la PREMIERE ligne de sceau reconnue.
+
+    Reconstruction octet pour octet (split/join sur \n) : l'empreinte
+    sha16 est donc calculable des deux cotes sans ambiguite.
+    """
+    sortie, retire = [], False
+    for raw in content.split("\n"):
+        if not retire:
+            cand = strip_markup(raw)
+            if cand and (SEAL_RE_V2.match(cand) or SEAL_RE.match(cand)):
+                retire = True
+                continue
+        sortie.append(raw)
+    return "\n".join(sortie)
 
 
 def check_content(secret, content):
     """Verifie un message entrant complet. -> (ok, turn, verdict, raison).
 
-    La ligne #NESTOR/v1 peut etre n'importe ou dans le message et
-    eventuellement habillee de Markdown ; le sceau HMAC, lui, doit etre
-    exact (securite inchangee par rapport a la ligne 1 stricte).
+    v2 : la ligne #NESTOR/v2 embarque l'empreinte sha16 du corps ; le HMAC
+    la couvre, donc un corps substitue ne verifie plus. v1 : comportement
+    historique (sceau sur tour+verdict seulement).
     """
     line = find_seal_line(content)
     if line is None:
         return False, None, None, "ligne de sceau absente ou mal formee"
+    m2 = SEAL_RE_V2.match(line)
+    if m2:
+        turn, verdict, empreinte, seal = m2.groups()
+        if hash16(body_sans_sceau(content).encode("utf-8")) != empreinte:
+            return False, turn, verdict, "corps modifie (sha16 != empreinte du corps)"
+        attendu = make_seal_v2(secret, turn, verdict, empreinte)
+        if not hmac.compare_digest(attendu, seal):
+            return False, turn, verdict, "sceau v2 invalide"
+        return True, turn, verdict, "ok (v2, corps lie)"
     return check_seal(secret, line)
 
 
@@ -271,7 +316,19 @@ def cmd_selftest(a):
     assert hmac.compare_digest(got, got), "inseal: recalcul instable"
     assert make_seal(s, "000002", "8") != make_seal(s, "000002", "9"), \
         "inseal: verdict sans effet sur le sceau"
-    print("selftest OK  attestation=%s  sceau valide (brut+fenced+gras+inseal)" % line)
+    # v1.4 : sceau v2 lie au corps (sha16) — rejet d'un corps substitue
+    corps_v2 = "Doctrine recue.\n\nSpec T02 : extraire objectif, livrable, acceptation.\n"
+    emp = hash16(corps_v2.encode("utf-8"))
+    seal_v2 = make_seal_v2(s, "000004", "7", emp)
+    msg_v2 = "#NESTOR/v2|turn=000004|verdict=7|sha16=%s|seal=%s\n%s" % (emp, seal_v2, corps_v2)
+    ok, turn, verdict, raison = check_content(s, msg_v2)
+    assert ok and turn == "000004" and verdict == "7", raison
+    falsifie = msg_v2.replace("Spec T02", "Spec T03", 1)
+    assert not check_content(s, falsifie)[0], "corps modifie accepte (v2)"
+    assert hash16(body_sans_sceau(falsifie).encode("utf-8")) != emp, \
+        "empreinte du corps non recalculable"
+    print("selftest OK  attestation=%s  sceau v1 (brut+fenced+gras+inseal) + v2 (corps lie)" % line)
+    print("vecteur v2 (cle '0'*32)  corps sha16=%s  sceau=%s" % (emp, seal_v2))
     return 0
 
 
@@ -413,14 +470,35 @@ def cmd_verify(a):
 
 
 def cmd_inseal(a):
-    """Verifie un sceau entrant Manus (recalcul HMAC). -> ligne seal_check=ok fondee."""
+    """Verifie un sceau entrant Manus (recalcul HMAC). -> ligne seal_check=ok fondee.
+
+    Mode v1 (historique) : HMAC sur tour+verdict.
+    Mode v2 (--body ou --sha16) : HMAC sur tour+verdict+empreinte du corps ;
+    avec --body, l'empreinte est recalculee depuis le fichier.
+    """
     secret = read_secret(HMAC_PATH, "NESTOR_HMAC_KEY")
     if not secret:
         die("secret HMAC introuvable (%s ou $NESTOR_HMAC_KEY)" % HMAC_PATH)
-    got = make_seal(secret, a.turn, a.verdict)
     recu = a.sig.strip().lower()
+    if a.body or a.sha16:
+        corps = b""
+        if a.body:
+            try:
+                corps = open(a.body, "rb").read()
+            except OSError as e:
+                die("corps illisible : %s" % e)
+        empreinte = (a.sha16.strip().lower() if a.sha16 else hash16(corps))
+        attendu = make_seal_v2(secret, a.turn, a.verdict, empreinte)
+        ok = hmac.compare_digest(attendu, recu)
+        if a.body and hash16(corps) != empreinte:
+            ok = False
+        print(json.dumps({"mode": "v2", "turn": a.turn, "verdict": a.verdict,
+                          "sha16": empreinte, "attendu": attendu, "recu": recu,
+                          "ok": ok}, ensure_ascii=False))
+        return 0 if ok else 5
+    got = make_seal(secret, a.turn, a.verdict)
     ok = hmac.compare_digest(got, recu)
-    print(json.dumps({"turn": a.turn, "verdict": a.verdict,
+    print(json.dumps({"mode": "v1", "turn": a.turn, "verdict": a.verdict,
                       "attendu": got, "recu": recu, "ok": ok}, ensure_ascii=False))
     return 0 if ok else 5
 
@@ -480,6 +558,8 @@ def main():
     q.add_argument("--turn", required=True, help="ex. 000002 (6 chiffres)")
     q.add_argument("--verdict", required=True, help="ex. 8 ou na")
     q.add_argument("--sig", required=True, help="16 hex du sceau recu")
+    q.add_argument("--sha16", default=None, help="v2 : empreinte du corps (16 hex)")
+    q.add_argument("--body", default=None, help="v2 : fichier du corps (empreinte recalculee)")
     q.set_defaults(fn=cmd_inseal)
 
     a = p.parse_args()
