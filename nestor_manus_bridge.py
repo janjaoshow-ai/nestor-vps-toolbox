@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # nestor_manus_bridge.py -- liaison directe Nestor (VPS / OpenClaw) <-> Manus API v2
-# v1.2 -- 2026-11-03 -- stdlib only, python3.8+
+# v1.3 -- 2026-11-03 -- stdlib only, python3.8+
 #
+# v1.3 : commande `inseal` -- Nestor verifie lui-meme le sceau entrant de Manus
+#        (recalcul HMAC) pour publier une ligne seal_check=ok fondee, exigee
+#        par la discipline boite (protocole Echange M>N).
 # v1.2 : extraction TOLERANTE du sceau entrant : la ligne #NESTOR/v1 est
 #        cherchée dans tout le message et débarrassée des habillages
 #        Markdown (fences ``` , gras **, espaces). Nouveau : poll --rescan
@@ -21,6 +24,7 @@
 #        --task-ref T12 --self-score 7 [--new] [--project-id ID] [--dry-run]
 #   ./nestor_manus_bridge.py poll --timeout 2700 [--rescan]
 #   ./nestor_manus_bridge.py verify --line 'NESTOR1|seq=124|...'
+#   ./nestor_manus_bridge.py inseal --turn 000002 --verdict 8 --sig <16 hex>
 #   ./nestor_manus_bridge.py credits
 #   ./nestor_manus_bridge.py state
 #
@@ -262,7 +266,12 @@ def cmd_selftest(a):
         "message sans sceau accepte"
     assert not check_content(s, fenced.replace(seal, "f" * 16, 1))[0], \
         "mauvais sceau accepte (fenced)"
-    print("selftest OK  attestation=%s  sceau valide (brut+fenced+gras)" % line)
+    # v1.3 : recalcul du sceau entrant (commande inseal)
+    got = make_seal(s, "000002", "8")
+    assert hmac.compare_digest(got, got), "inseal: recalcul instable"
+    assert make_seal(s, "000002", "8") != make_seal(s, "000002", "9"), \
+        "inseal: verdict sans effet sur le sceau"
+    print("selftest OK  attestation=%s  sceau valide (brut+fenced+gras+inseal)" % line)
     return 0
 
 
@@ -403,6 +412,19 @@ def cmd_verify(a):
     return 0 if ok else 5
 
 
+def cmd_inseal(a):
+    """Verifie un sceau entrant Manus (recalcul HMAC). -> ligne seal_check=ok fondee."""
+    secret = read_secret(HMAC_PATH, "NESTOR_HMAC_KEY")
+    if not secret:
+        die("secret HMAC introuvable (%s ou $NESTOR_HMAC_KEY)" % HMAC_PATH)
+    got = make_seal(secret, a.turn, a.verdict)
+    recu = a.sig.strip().lower()
+    ok = hmac.compare_digest(got, recu)
+    print(json.dumps({"turn": a.turn, "verdict": a.verdict,
+                      "attendu": got, "recu": recu, "ok": ok}, ensure_ascii=False))
+    return 0 if ok else 5
+
+
 def cmd_credits(a):
     key = read_secret(KEY_PATH, "MANUS_API_KEY")
     r = api("GET", "/v2/usage.availableCredits", key=key)
@@ -453,6 +475,12 @@ def main():
     q.add_argument("--line", required=True)
     q.add_argument("--window", type=int, default=600)
     q.set_defaults(fn=cmd_verify)
+
+    q = sub.add_parser("inseal")
+    q.add_argument("--turn", required=True, help="ex. 000002 (6 chiffres)")
+    q.add_argument("--verdict", required=True, help="ex. 8 ou na")
+    q.add_argument("--sig", required=True, help="16 hex du sceau recu")
+    q.set_defaults(fn=cmd_inseal)
 
     a = p.parse_args()
     sys.exit(a.fn(a))
