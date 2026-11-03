@@ -1,0 +1,13 @@
+{
+  "_note": "Allow-list PUBLIQUE des tours emis par Manus poste principal. Le pont exige la presence du sceau ici AVANT d'accepter un message (exit 8 sinon). Mettre a jour : Manus ajoute le sceau de chaque nouveau tour ici, en meme temps que sa ligne dans le REGISTRE ; JJ rafraichit le fichier local avant chaque re-ping. turn 000006 volontairement absent : declare NON EMIS par Manus. turn 000008 (sceau 2efc706a606e1505) = collision avec l'emetteur parallele (R-09) : il est enregistre car emis par le poste principal, mais jamais reprise dessus.",
+  "v2_from": "000009",
+  "turns": {
+    "000001": {"seal": "70a25ba089ee6f32", "v": 1},
+    "000002": {"seal": "c498c70877a188b1", "v": 1},
+    "000003": {"seal": "e493502ed6fc2d82", "v": 1},
+    "000004": {"seal": "91a81b7ff322f8bd", "v": 1},
+    "000005": {"seal": "229cf6349dc61930", "v": 1},
+    "000007": {"seal": "faed3cf2a140006a", "v": 1},
+    "000008": {"seal": "2efc706a606e1505", "v": 1}
+  }
+}
