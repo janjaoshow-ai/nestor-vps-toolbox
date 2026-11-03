@@ -2,56 +2,69 @@
 # nestor_manus_bridge.py -- liaison directe Nestor (VPS / OpenClaw) <-> Manus API v2
 # v1.5 -- 2026-11-03 -- stdlib only, python3.8+
 #
-# v1.5 : PORTE DE REGISTRE (allow-list publique des sceaux emis par Manus).
-#        Le pont ne recalcule plus le sceau seul : il exige aussi que le
-#        sceau soit PRESENT dans approved_turns.json. Deux effets :
-#          - tour non enregistre (emetteur parallele, R-09) -> quarantaine,
-#            exit 8, sans effet sur last_turn (le tour n'existe pas) ;
-#          - apres rotation de cle, les sceaux de l'ancienne cle sont morts
-#            cryptographiquement ET historiquement (leur empreinte figure
-#            dans le registre mais ne verifie plus avec la nouvelle cle) ;
-#            la continuite d'identite du registre est la seule autorite.
-#        v2 OBLIGATOIRE a partir du tour v2_from (default 000009) : les tours
-#        ulterieurs doivent porter le sceau liant le corps (sha16). Format
-#        v1 accepte en dessous (historique 000001-000008).
-#        Scan CHRONOLOGIQUE en poll : tous les messages assistant non vus
-#        entre la borne et le present sont evalues dans l'ordre. Limitation
-#        du canal prise en compte : MAX_BODY_BYTES 1800 (coupe mesuree a
-#        2048 o sur le canal ; un corps plus long arrive tronque et le v2
-#        rejette a juste titre).
+# v1.5 : PORTE DE REGISTRE (defense mecanique contre l'emetteur parallele, R-09).
+#        - allow-list approved_turns.json (sceaux PUBLICS du REGISTRE, aucune cle
+#          necessaire pour la comparaison) : un tour cryptographiquement valide
+#          mais ABSENT du registre est mis en quarantaine, exit 8. Un sceau qui
+#          differe de la valeur enregistree est refuse de la meme facon.
+#        - poll : scan de l'historique des messages dans l'ordre CHRONOLOGIQUE
+#          (plus seulement le dernier message). Chaque message non traite est
+#          evalue ; le premier message sain ET enregistre est livre, les tours
+#          sautés par l'emetteur parallele ne bloquent plus la file.
+#        - v2 obligatoire pour les tours >= v2_from (defaut 000009) : un v1
+#          nouveau est refuse (exit 8). v1 toujours accepte pour les tours
+#          legacy de l'allow-list.
+#        - send : plafond corps abaisse a 1800 o (troncation canal mesuree a
+#          2048 o ; doctrine v1.1).
+#        IMPORTANT : en l'absence d'allow-list lisible, le poll REFUSE de
+#        traiter quoi que ce soit (fail closed). Deploier approved_turns.json
+#        a cote de ce script (meme repertoire) ou pointer NESTOR_APPROVED.
 # v1.4.1 : compteur seq protege. L'etat est desormais sauvegarde AVANT l'appel
 #        best-effort `baseline` ; un echec reseau de celui-ci ne provoque plus
 #        la re-emission du meme seq au tour suivant (bug constate : seq=3
-#        emis 2 fois).
+#        emis 2 fois — le message partait, mais le seq n'etait pas persiste).
 # v1.4 : sceau v2 LIANT LE CORPS du message : la ligne #NESTOR/v2 embarque
 #        sha16 = sha256(corps sans la ligne de sceau)[:16], et le HMAC porte
 #        sur "NESTOR/v2|turn=...|verdict=...|sha16:...". Un corps substitue
-#        ne verifie plus. Compatibilite v1 preservee en dessous de v2_from.
+#        (brouillon vs message reel, meme tour/verdict) ne verifie plus.
+#        Compatibilite v1 preservee (les lignes v1 restent acceptees).
+#        inseal etendu : [--body fichier | --sha16 empreinte] -> mode v2.
 # v1.3 : commande `inseal` -- Nestor verifie lui-meme le sceau entrant de Manus
-#        pour publier une ligne seal_check=ok fondee.
-# v1.2 : extraction TOLERANTE du sceau entrant : ligne cherchee dans tout le
-#        message, debarrassee des habillages Markdown (fences, gras).
-# v1.1 : verification automatique du sceau entrant, rejeu par numero de tour,
-#        quarantaine des messages non scelles.
+#        (recalcul HMAC) pour publier une ligne seal_check=ok fondee, exigee
+#        par la discipline boite (protocole Echange M>N).
+# v1.2 : extraction TOLERANTE du sceau entrant : la ligne #NESTOR/v1 est
+#        cherchée dans tout le message et débarrassée des habillages
+#        Markdown (fences ``` , gras **, espaces). Nouveau : poll --rescan
+#        pour re-vérifier le dernier message quarantainé après correction
+#        du pont. Selftest étendu (brut + fenced + gras).
+# v1.1 : verification AUTOMATIQUE du sceau entrant (Manus -> Nestor),
+#        detection de rejeu par numero de tour, quarantaine des messages
+#        non scelles, profils limites a standard/lite.
 #
 # Secrets (jamais dans un prompt, jamais en clair dans un log) :
 #   /root/.secrets/manus_api_key   (600)  cle API, en-tete x-manus-api-key
 #   /root/.secrets/nestor_hmac     (600)  secret partage HMAC-SHA256
 #
+# Fichiers de configuration (PUBLIC, aucun secret — les sceaux 16 hex sont
+# des valeurs publiques du REGISTRE, comparables sans la cle) :
+#   approved_turns.json a cote de ce script (ou $NESTOR_APPROVED) :
+#     {"v2_from": "000009",
+#      "turns": {"000001": {"seal": "<16 hex>", "v": 1}, ... }}
+#
 # Usage :
 #   ./nestor_manus_bridge.py selftest
 #   ./nestor_manus_bridge.py send --body /chemin/rapport.md --type report \
 #        --task-ref T12 --self-score 7 [--new] [--project-id ID] [--dry-run]
-#   ./nestor_manus_bridge.py poll --timeout 2700 [--rescan] [--limit N]
+#   ./nestor_manus_bridge.py poll --timeout 2700 [--rescan] [--limit 50]
 #   ./nestor_manus_bridge.py verify --line 'NESTOR1|seq=124|...'
 #   ./nestor_manus_bridge.py inseal --turn 000002 --verdict 8 --sig <16 hex> \
-#        [--body /chemin/corps.md | --sha16 empreinte]   (mode v2)
+#        [--body /chemin/corps.md | --sha16 <16 hex>]   (mode v2)
 #   ./nestor_manus_bridge.py credits
 #   ./nestor_manus_bridge.py state
 #
 # Codes de sortie : 0 ok, 1 usage, 2 API, 3 reseau, 4 timeout/erreur tache,
 #                   5 sceau entrant invalide, 6 rejeu detecte, 7 non scelle,
-#                   8 tour non enregistre au registre (R-09)
+#                   8 tour non enregistre / sceau != registre / v1 interdit
 
 import argparse
 import hashlib
@@ -83,8 +96,6 @@ SEAL_RE = re.compile(
 SEAL_RE_V2 = re.compile(
     r"^#NESTOR/v2\|turn=(\d{6})\|verdict=([0-9]{1,2}|na)\|sha16=([0-9a-f]{16})\|seal=([0-9a-f]{16})$"
 )
-TURN_RE = re.compile(r"^\d{6}$")
-SEAL_HEX_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
 def die(msg, code=1):
@@ -147,74 +158,29 @@ def check_attestation(secret, line, window=600, now=None):
     return True, fields
 
 
-# ---------------------------------------------------------------- registre
+# ---------------------------------------------------------------- allow-list
 
 def load_approved(path=None):
-    """Charge l'allow-list des tours enregistres. FAIL-CLOSED : toute erreur
-    de lecture ou de forme refuse le service (exit 8 au poll)."""
+    """Charge l'allow-list {turn: {seal, v}, v2_from}. Fail closed : toute
+    erreur de lecture est fatale pour l'appelant (le poll ne doit jamais
+    fonctionner sans porte de registre)."""
     p = path or APPROVED_PATH
     try:
         with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, ValueError) as e:
-        die("registre illisible ou mal forme (%s) : %s -- porte fermee" % (p, e), 8)
-    turns = data.get("turns")
+    except OSError:
+        die("allow-list introuvable (%s) : refus de traiter (fail closed)" % p, 8)
+    except ValueError:
+        die("allow-list illisible (%s) : JSON invalide, refus de traiter" % p, 8)
+    turns = data.get("turns", {})
     if not isinstance(turns, dict):
-        die("registre sans table 'turns' -- porte fermee", 8)
-    for t, entry in turns.items():
-        if not TURN_RE.match(str(t)) or not isinstance(entry, dict) \
-                or not SEAL_HEX_RE.match(str(entry.get("seal", ""))):
-            die("entree registre invalide : %s -- porte fermee" % t, 8)
+        die("allow-list mal formee (%s) : 'turns' absent" % p, 8)
+    for t, e in turns.items():
+        if not (isinstance(t, str) and len(t) == 6 and t.isdigit()
+                and isinstance(e, dict) and re.fullmatch(r"[0-9a-f]{16}", e.get("seal", ""))):
+            die("allow-list mal formee (%s) : entree %r invalide" % (p, t), 8)
     data.setdefault("v2_from", "999999")
     return data
-
-
-def seal_of_line(content):
-    """Renvoie (seal, version, turn) de la premiere ligne de sceau reconnue."""
-    line = find_seal_line(content)
-    if line is None:
-        return None, None, None
-    m2 = SEAL_RE_V2.match(line)
-    if m2:
-        return m2.group(4), 2, m2.group(1)
-    m1 = SEAL_RE.match(line)
-    if m1:
-        return m1.group(3), 1, m1.group(1)
-    return None, None, None
-
-
-def evaluate_incoming(secret, content, approved):
-    """Verdict complet d'un message entrant.
-
-    -> (decision, turn, verdict, raison, version)
-    decision dans {"accept", "quarantine", "non_scelle"}
-
-    Ordre des gardes : forme -> cryptographie -> enregistrement -> version.
-    Un tour non enregistre n'existe pas : il est quarantaine SANS toucher
-    a last_turn (sinon le tour 000009 reel, arrive apres, serait rejete
-    comme rejeu de 000008-jumeau).
-    """
-    line = find_seal_line(content)
-    if line is None:
-        return "non_scelle", None, None, "ligne de sceau absente ou mal formee", None
-    version = 2 if SEAL_RE_V2.match(line) else 1
-    ok, turn, verdict, raison = check_content(secret, content)
-    if not ok:
-        return "quarantine", turn, verdict, raison, version
-    entry = approved.get("turns", {}).get(turn)
-    if entry is None:
-        return "quarantine", turn, verdict, \
-            "tour %s non enregistre au registre (R-09 : emetteur parallele, sans effet)" % turn, \
-            version
-    if int(turn) >= int(approved.get("v2_from", "999999")) and version != 2:
-        return "quarantine", turn, verdict, \
-            "format v1 interdit au tour %s (v2_from=%s) : le sceau v1 est mort" % (
-                turn, approved.get("v2_from")), version
-    seal, _, _ = seal_of_line(content)
-    if not hmac.compare_digest(entry["seal"], seal):
-        return "quarantine", turn, verdict, \
-            "sceau != registre (emission parallele du meme tour : R-09)", version
-    return "accept", turn, verdict, "ok", version
 
 
 # ---------------------------------------------------------------- sceau entrant
@@ -267,8 +233,24 @@ def find_seal_line(content):
     return None
 
 
+def seal_of_line(content):
+    """-> (sceau 16 hex, version 1|2, turn) ou (None, None, None)."""
+    line = find_seal_line(content)
+    if line is None:
+        return None, None, None
+    m2 = SEAL_RE_V2.match(line)
+    if m2:
+        return m2.group(4), 2, m2.group(1)
+    m1 = SEAL_RE.match(line)
+    return m1.group(3), 1, m1.group(1)
+
+
 def body_sans_sceau(content):
-    """Corps du message = tout sauf la PREMIERE ligne de sceau reconnue."""
+    """Corps du message = tout sauf la PREMIERE ligne de sceau reconnue.
+
+    Reconstruction octet pour octet (split/join sur la nouvelle ligne) :
+    l'empreinte sha16 est calculable des deux cotes sans ambiguite.
+    """
     sortie, retire = [], False
     for raw in content.split("\n"):
         if not retire:
@@ -281,7 +263,12 @@ def body_sans_sceau(content):
 
 
 def check_content(secret, content):
-    """Verifie un message entrant complet. -> (ok, turn, verdict, raison)."""
+    """Verifie un message entrant complet. -> (ok, turn, verdict, raison).
+
+    v2 : la ligne #NESTOR/v2 embarque l'empreinte sha16 du corps ; le HMAC
+    la couvre, donc un corps substitue ne verifie plus. v1 : comportement
+    historique (sceau sur tour+verdict seulement).
+    """
     line = find_seal_line(content)
     if line is None:
         return False, None, None, "ligne de sceau absente ou mal formee"
@@ -295,6 +282,35 @@ def check_content(secret, content):
             return False, turn, verdict, "sceau v2 invalide"
         return True, turn, verdict, "ok (v2, corps lie)"
     return check_seal(secret, line)
+
+
+def evaluate_incoming(secret, content, approved):
+    """Porte de registre v1.5. -> (decision, turn, verdict, raison, version).
+
+    decision in {"accept", "quarantine", "non_scelle"}.
+    Ordre des gardes : forme du sceau -> cryptographie (cle) -> enregistrement
+    (allow-list) -> version (v2 obligatoire pour les nouveaux tours).
+    Un sceau cryptographiquement valide MAIS non enregistre (emetteur
+    parallele, R-09) tombe en quarantaine comme les autres.
+    """
+    line = find_seal_line(content)
+    if line is None:
+        return "non_scelle", None, None, "ligne de sceau absente ou mal formee", None
+    version = 2 if SEAL_RE_V2.match(line) else 1
+    ok, turn, verdict, raison = check_content(secret, content)
+    if not ok:
+        return "quarantine", turn, verdict, raison, version
+    entry = approved.get("turns", {}).get(turn)
+    if entry is None:
+        return "quarantine", turn, verdict, \
+            "tour %s non enregistre au registre (R-09 : sans effet)" % turn, version
+    if int(turn) >= int(approved.get("v2_from", "999999")) and version != 2:
+        return "quarantine", turn, verdict, \
+            "format v1 interdit pour les tours >= %s (doctrine v1.1)" % approved["v2_from"], version
+    if not hmac.compare_digest(entry["seal"], seal_of_line(content)[0]):
+        return "quarantine", turn, verdict, \
+            "sceau != registre pour le tour %s (emetteur non authentifie)" % turn, version
+    return "accept", turn, verdict, "ok (tour %s enregistre)" % turn, version
 
 
 def quarantine(content, why, turn=None):
@@ -406,42 +422,46 @@ def cmd_selftest(a):
     assert ok and turn == "000004" and verdict == "7", raison
     falsifie = msg_v2.replace("Spec T02", "Spec T03", 1)
     assert not check_content(s, falsifie)[0], "corps modifie accepte (v2)"
+    assert hash16(body_sans_sceau(falsifie).encode("utf-8")) != emp, \
+        "empreinte du corps non recalculable"
     # v1.5 : porte de registre
-    approved_test = {"v2_from": "000009", "turns": {
-        "000004": {"seal": seal_v2, "v": 2},
+    approved = {"v2_from": "000050", "turns": {
         "000042": {"seal": seal, "v": 1},
-        "000043": {"seal": make_seal(s, "000043", "8"), "v": 1},
-        "000009": {"seal": "f" * 16, "v": 2},  # place pour test v2_from
-        "000051": {"seal": "e" * 16, "v": 1},  # v1 enregistre mais interdit
+        "000004": {"seal": seal_v2, "v": 2},
     }}
-    # tour enregistre + sceau correct -> accept
-    dec, t, v, r, ver = evaluate_incoming(s, msg_v2, approved_test)
-    assert dec == "accept" and t == "000004", r
-    # tour absent du registre -> quarantaine 8, SANS effet sur last_turn
-    seal_x = make_seal(s, "000099", "7")
-    msg_x = "#NESTOR/v1|turn=000099|verdict=7|seal=" + seal_x
-    dec, t, v, r, ver = evaluate_incoming(s, msg_x, approved_test)
-    assert dec == "quarantine" and "non enregistre" in r, r
-    # sceau valide du jumeau (tour 000008 parallele, non enregistre)
-    seal_j = make_seal(s, "000008", "9")
-    msg_j = "#NESTOR/v1|turn=000008|verdict=9|seal=" + seal_j
-    dec, t, v, r, ver = evaluate_incoming(s, msg_j, approved_test)
-    assert dec == "quarantine" and "non enregistre" in r, r
-    # v1 interdit au-dela de v2_from (tour 000051 enregistre en v1)
-    dec, t, v, r, ver = evaluate_incoming(s, msg_v2, approved_test)  # rappel : accept
-    seal_51 = make_seal(s, "000051", "7")
-    msg_51 = "#NESTOR/v1|turn=000051|verdict=7|seal=" + seal_51
-    dec, t, v, r, ver = evaluate_incoming(s, msg_51, approved_test)
-    assert dec == "quarantine" and "v1 interdit" in r, r
-    # v2 accepte sous v2_from
-    emp4 = hash16(corps_v2.encode("utf-8"))
-    s4 = make_seal_v2(s, "000004", "7", emp4)
-    m4 = "#NESTOR/v2|turn=000004|verdict=7|sha16=%s|seal=%s\n%s" % (emp4, s4, corps_v2)
-    dec, t, v, r, ver = evaluate_incoming(s, m4, approved_test)
-    assert dec == "accept" and ver == 2, r
-    # non scelle -> non_scelle
-    dec, t, v, r, ver = evaluate_incoming(s, "rien du tout", approved_test)
-    assert dec == "non_scelle", r
+    d = evaluate_incoming(s, fenced, approved)
+    assert d[0] == "accept" and d[1] == "000042", d
+    d = evaluate_incoming(s, msg_v2, approved)
+    assert d[0] == "accept" and d[1] == "000004", d
+    # tour non enregistre -> quarantine (R-09)
+    msg_inconnu = "intro\n#NESTOR/v1|turn=000099|verdict=5|seal=%s\n" % \
+        make_seal(s, "000099", "5")
+    d = evaluate_incoming(s, msg_inconnu, approved)
+    assert d[0] == "quarantine" and "non enregistre" in d[3], d
+    # sceau valide mais != registre (emetteur parallele / verdict substitue)
+    msg_parallele = "intro\n#NESTOR/v1|turn=000042|verdict=3|seal=%s\n" % \
+        make_seal(s, "000042", "3")
+    d = evaluate_incoming(s, msg_parallele, approved)
+    assert d[0] == "quarantine" and "!= registre" in d[3], d
+    # v1 interdit pour les tours >= v2_from (tour ENREGISTRE mais en v1)
+    msg_v1_recent = "intro\n#NESTOR/v1|turn=000051|verdict=8|seal=%s\n" % \
+        make_seal(s, "000051", "8")
+    approved3 = {"v2_from": "000050",
+                 "turns": {"000051": {"seal": make_seal(s, "000051", "8"), "v": 2}}}
+    d = evaluate_incoming(s, msg_v1_recent, approved3)
+    assert d[0] == "quarantine" and "v1 interdit" in d[3], d
+    # v2 recent correct -> accept
+    corps_recent = "Corps du tour 51.\n"
+    emp51 = hash16(corps_recent.encode("utf-8"))
+    seal51 = make_seal_v2(s, "000051", "8", emp51)
+    msg51 = "#NESTOR/v2|turn=000051|verdict=8|sha16=%s|seal=%s\n%s" % (emp51, seal51, corps_recent)
+    approved2 = {"v2_from": "000050", "turns": {"000051": {"seal": seal51, "v": 2}}}
+    d = evaluate_incoming(s, msg51, approved2)
+    assert d[0] == "accept" and d[4] == 2, d
+    # non scelle
+    d = evaluate_incoming(s, "rien ici", approved)
+    assert d[0] == "non_scelle", d
+    # allow-list mal formee : entree invalide detectee par load_approved
     print("selftest OK  attestation=%s  sceau v1 (brut+fenced+gras+inseal) + v2 (corps lie)" % line)
     print("selftest OK  porte de registre v1.5 (enregistre/parallele/v1-interdit/v2-obligatoire)")
     print("vecteur v2 (cle '0'*32)  corps sha16=%s  sceau=%s" % (emp, seal_v2))
@@ -459,28 +479,6 @@ def newest_assistant_id(task_id, key):
         if m.get("type") == "assistant_message":
             return m.get("id")
     return None
-
-
-def unseen_candidates(messages, last_seen, baseline):
-    """Construit la file chronologique des messages a evaluer.
-
-    messages : page task.listMessages en ordre DESC (le plus recent d'abord).
-    -> liste ordre chronologique (plus ancien d'abord).
-    Si last_seen est dans la page : tout ce qui est AVANT lui (plus ancien)
-    est candidat. Sinon : depuis baseline (incluse), sauf si baseline absent
-    de la page -> seul le plus recent (rejeu massif impossible : une page
-    ne peut pas representer tout l'historique).
-    """
-    chron = list(reversed(messages))
-    ids = [m.get("id") for m in chron]
-    if last_seen in ids:
-        i = ids.index(last_seen)
-        return chron[:i]
-    if baseline in ids:
-        return chron[ids.index(baseline) + 1:]
-    if chron:
-        return chron[-1:]
-    return []
 
 
 def cmd_send(a):
@@ -535,18 +533,44 @@ def cmd_send(a):
     return 0
 
 
+def unseen_candidates(messages, last_seen, baseline):
+    """messages = liste API (ordre desc). -> candidats non traites, dans
+    l'ordre CHRONOLOGIQUE (du plus ancien au plus recent), bornes excluses.
+
+    La borne est last_seen s'il figure dans la page courante ; sinon
+    baseline ; si aucune des deux ne figure (page trop vieille ou tout
+    neuf), seul le message le plus recent est candidat : mieux vaut
+    livrer un tour tard que rejouer toute l'historique en quarantaine.
+    """
+    chron = list(reversed(messages))
+    boundary = None
+    if last_seen and any(m.get("id") == last_seen for m in chron):
+        boundary = last_seen
+    elif baseline and any(m.get("id") == baseline for m in chron):
+        boundary = baseline
+    if boundary is None:
+        return chron[-1:]
+    out, started = [], False
+    for m in chron:
+        if m.get("id") == boundary:
+            started = True
+            continue
+        if started:
+            out.append(m)
+    return out
+
+
 def cmd_poll(a):
     key = read_secret(KEY_PATH, "MANUS_API_KEY")
     secret = read_secret(HMAC_PATH, "NESTOR_HMAC_KEY")
+    approved = load_approved()  # fail closed : pas d'allow-list, pas de poll
     st = load_state()
     if a.rescan:
-        # relire aussi les messages deja marques vus (apres correction du pont)
+        # relire aussi le dernier message (ex. quarantaine apres correction du pont)
         st.pop("last_seen", None)
-        st.pop("baseline", None)
     task_id = a.task_id or st.get("task_id")
     if not task_id:
         die("aucun task_id connu")
-    approved = load_approved()  # fail-closed : registre exige a chaque tour
     deadline = time.time() + a.timeout
     delay = a.interval
     while True:
@@ -567,24 +591,23 @@ def cmd_poll(a):
                                                st.get("baseline"))
                 for newest in candidates:
                     content = newest.get("assistant_message", {}).get("content", "")
-                    decision, turn, verdict, raison, version = \
-                        evaluate_incoming(secret, content, approved)
-                    if decision == "non_scelle":
-                        p = quarantine(content, raison, turn)
+                    if secret:
+                        decision, turn, verdict, raison, version = evaluate_incoming(
+                            secret, content, approved)
+                    else:
+                        decision, turn, verdict, raison, version = \
+                            "quarantine", None, None, "secret HMAC introuvable", None
+                    if decision != "accept":
                         st["last_seen"] = newest.get("id")
                         save_state(st)
-                        sys.stderr.write("REFUSE (%s) -> quarantaine: %s\n" % (raison, p))
-                        die("message entrant non scelle", 7)
-                    if decision == "quarantine":
                         p = quarantine(content, raison, turn)
-                        st["last_seen"] = newest.get("id")
-                        save_state(st)
                         sys.stderr.write("REFUSE (%s) -> quarantaine: %s\n" % (raison, p))
+                        if decision == "non_scelle":
+                            die("message entrant non scelle", 7)
                         if "non enregistre" in raison or "!= registre" in raison \
-                                or "interdit" in raison:
-                            die(raison, 8)  # R-09 : tour fantome, sans effet
+                                or "v1 interdit" in raison:
+                            die(raison, 8)
                         die("sceau entrant invalide", 5)
-                    # accepte
                     last_turn = int(st.get("last_turn", 0))
                     if int(turn) <= last_turn:
                         st["last_seen"] = newest.get("id")
@@ -624,8 +647,9 @@ def cmd_verify(a):
 def cmd_inseal(a):
     """Verifie un sceau entrant Manus (recalcul HMAC). -> ligne seal_check=ok fondee.
 
-    Mode v1 : HMAC sur tour+verdict.
-    Mode v2 (--body ou --sha16) : HMAC sur tour+verdict+empreinte du corps.
+    Mode v1 (historique) : HMAC sur tour+verdict.
+    Mode v2 (--body ou --sha16) : HMAC sur tour+verdict+empreinte du corps ;
+    avec --body, l'empreinte est recalculee depuis le fichier.
     """
     secret = read_secret(HMAC_PATH, "NESTOR_HMAC_KEY")
     if not secret:
@@ -697,7 +721,8 @@ def main():
     q.add_argument("--timeout", type=int, default=2700)
     q.add_argument("--interval", type=int, default=20)
     q.add_argument("--max-interval", type=int, default=60)
-    q.add_argument("--limit", type=int, default=50)
+    q.add_argument("--limit", type=int, default=50,
+                   help="profondeur du scan d'historique (messages)")
     q.add_argument("--rescan", action="store_true")
     q.set_defaults(fn=cmd_poll)
 
