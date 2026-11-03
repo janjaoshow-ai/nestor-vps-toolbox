@@ -38,9 +38,9 @@
       "ref": "M8N8 correction R-07, 7/10 maintenu, 1444 o"
     },
     "000009": {
-      "seal": "55db16723be8f09a",
+      "seal": "1959b177c7ecab80",
       "v": 2,
-      "ref": "M9N8 v2, verdict na : provenance T03 verifiee, corps du rapport non recu"
+      "ref": "M9N8 v2, verdict na : provenance T03 verifiee, corps non recu, defaut poll signale"
     }
   }
 }
