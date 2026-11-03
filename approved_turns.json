@@ -1,13 +1,13 @@
 {
-  "_note": "Allow-list PUBLIQUE des tours emis par Manus poste principal. Le pont exige la presence du sceau ici AVANT d'accepter un message (exit 8 sinon). Mettre a jour : Manus ajoute le sceau de chaque nouveau tour ici, en meme temps que sa ligne dans le REGISTRE ; JJ rafraichit le fichier local avant chaque re-ping. turn 000006 volontairement absent : declare NON EMIS par Manus. turn 000008 (sceau 2efc706a606e1505) = collision avec l'emetteur parallele (R-09) : il est enregistre car emis par le poste principal, mais jamais reprise dessus.",
+  "_note": "Allow-list PUBLIQUE du pont v1.5 (aucun secret : les sceaux 16 hex sont des valeurs du REGISTRE). Registre faisant foi = post principal, verifie par Kimi. Tout tour valable cryptographiquement mais ABSENT de cette liste = quarantaine exit 8 (R-09). turn 000006 volontairement absent : declare NON EMIS par le registre — tout sceau a ce numero vient de l'emetteur parallele.",
   "v2_from": "000009",
   "turns": {
-    "000001": {"seal": "70a25ba089ee6f32", "v": 1},
-    "000002": {"seal": "c498c70877a188b1", "v": 1},
-    "000003": {"seal": "e493502ed6fc2d82", "v": 1},
-    "000004": {"seal": "91a81b7ff322f8bd", "v": 1},
-    "000005": {"seal": "229cf6349dc61930", "v": 1},
-    "000007": {"seal": "faed3cf2a140006a", "v": 1},
-    "000008": {"seal": "2efc706a606e1505", "v": 1}
+    "000001": {"seal": "70a25ba089ee6f32", "v": 1, "ref": "T00 presentation, 6/10"},
+    "000002": {"seal": "c498c70877a188b1", "v": 1, "ref": "T01 canon 15 outils, 8/10 (capitalise)"},
+    "000003": {"seal": "e493502ed6fc2d82", "v": 1, "ref": "heartbeat T01.r2, 5/10"},
+    "000004": {"seal": "91a81b7ff322f8bd", "v": 1, "ref": "T02 cause racine, 8/10 (emis hors poste, R-08)"},
+    "000005": {"seal": "229cf6349dc61930", "v": 1, "ref": "heartbeat pret T03, 6/10"},
+    "000007": {"seal": "faed3cf2a140006a", "v": 1, "ref": "M7N7 re-grade T03, 7/10, 1791 o"},
+    "000008": {"seal": "2efc706a606e1505", "v": 1, "ref": "M8N8 correction R-07, 7/10 maintenu, 1444 o"}
   }
 }
