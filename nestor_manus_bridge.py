@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # nestor_manus_bridge.py -- liaison directe Nestor (VPS / OpenClaw) <-> Manus API v2
-# v1.5 -- 2026-11-03 -- stdlib only, python3.8+
+# v1.5.1 -- 2026-11-04 -- stdlib only, python3.8+
 #
+# v1.5.1 : poll() ignore les messages non scelles (quarantaine + journaliser +
+#          continuer), fail-closed conserve : si candidats vus mais aucun tour
+#          accepte -> exit 7. Prescrit par Manus au turn 000009.
 # v1.5 : PORTE DE REGISTRE (defense mecanique contre l'emetteur parallele, R-09).
 #        - allow-list approved_turns.json (sceaux PUBLICS du REGISTRE, aucune cle
 #          necessaire pour la comparaison) : un tour cryptographiquement valide
@@ -63,7 +66,8 @@
 #   ./nestor_manus_bridge.py state
 #
 # Codes de sortie : 0 ok, 1 usage, 2 API, 3 reseau, 4 timeout/erreur tache,
-#                   5 sceau entrant invalide, 6 rejeu detecte, 7 non scelle,
+#                   5 sceau entrant invalide, 6 rejeu detecte,
+#                   7 non scelle (ignores + quarantaine, aucun tour accepte),
 #                   8 tour non enregistre / sceau != registre / v1 interdit
 
 import argparse
@@ -603,7 +607,12 @@ def cmd_poll(a):
                         p = quarantine(content, raison, turn)
                         sys.stderr.write("REFUSE (%s) -> quarantaine: %s\n" % (raison, p))
                         if decision == "non_scelle":
-                            die("message entrant non scelle", 7)
+                            # v1.5.1 : message de service = quarantaine + log
+                            # ci-dessus, on saute et on continue le scan ;
+                            # etat deja sauvegarde. Le fail-closed est
+                            # preserve apres la boucle (exit 7 si rien
+                            # d'acceptable parmi les candidats).
+                            continue
                         if "non enregistre" in raison or "!= registre" in raison \
                                 or "v1 interdit" in raison:
                             die(raison, 8)
@@ -625,6 +634,10 @@ def cmd_poll(a):
                     if status == "waiting":
                         sys.stderr.write("NOTE task en attente d'input (stop_reason=ask)\n")
                     return 0
+                if candidates:
+                    # v1.5.1 : candidats vus mais tous non scelles (skips) :
+                    # rien a accepter -> fail-closed, on ne pretend pas "ok".
+                    die("messages non scelles ignores, aucun tour accepte", 7)
                 if status == "error":
                     die("tache en erreur : %s" % task.get("title", ""), 4)
                 if time.time() >= deadline:
